@@ -1,5 +1,7 @@
 # NoMansMovies
 
+The Windows EXE release will drop later today, 5/30/26
+
 Desktop movie-theater app with Instagram-style social profiles, friends, DMs, and watch-together sync. Built with PySide6 + Supabase + yt-dlp.
 
 ## Setup
