@@ -1,0 +1,30 @@
+# PyInstaller / build artifacts
+build/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Bundled / downloaded binaries — NOT redistributed in the repo.
+# NoMansMovies.exe is a release artifact; yt-dlp.exe is third-party and is
+# auto-downloaded at first launch by nomansmovies/ytdlp_manager.py.
+*.exe
+ytdlp/
+
+# OS junk
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Editors / IDE
+.vscode/
+.idea/
+*.swp
