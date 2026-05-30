@@ -1,6 +1,8 @@
 # PyInstaller / build artifacts
 build/
 dist/
+*_build_log.txt
+nmm_build_log.txt
 
 # Python
 __pycache__/

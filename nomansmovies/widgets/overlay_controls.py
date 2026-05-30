@@ -76,7 +76,7 @@ class OverlayControls(QWidget):
 
         row2.addStretch(1)
 
-        self.exit_btn = QPushButton("🚪  Leave Overlay")
+        self.exit_btn = QPushButton("🚪  Exit App")
         self.exit_btn.setProperty("accent", True)
         self.exit_btn.setMinimumHeight(36)
         self.exit_btn.setStyleSheet("QPushButton { font-weight: 700; font-size: 11pt; padding: 6px 18px; }")

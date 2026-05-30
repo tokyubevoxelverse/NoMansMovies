@@ -2,14 +2,15 @@
 from __future__ import annotations
 import sys
 from typing import Dict, Optional
-from PySide6.QtCore import Qt, QSettings, QTimer, QPoint, QSize
+from PySide6.QtCore import Qt, QSettings, QTimer, QPoint, QSize, QEventLoop
+from PySide6.QtGui import QMovie
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QStackedWidget, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QMessageBox
 )
 
 from . import ytdlp_manager
-from .config import APP_NAME, ORG_NAME, DEFAULT_COLORS
+from .config import APP_NAME, ORG_NAME, DEFAULT_COLORS, ASSETS_DIR
 from .theme import apply_theme
 from .supabase_client import supabase, try_restore_session, clear_session, current_user_id
 
@@ -131,6 +132,10 @@ class MainWindow(QMainWindow):
         self._was_playback_visible = False
         # Remember floating state of docks so we can restore on exit overlay.
         self._dock_was_floating: Dict[CollapsibleDock, bool] = {}
+        # Overlay-only build: profile opens as its own floating panel (never a
+        # separate windowed mode). _saved_flags is referenced by closeEvent.
+        self._saved_flags = None
+        self._float_profile: Optional[FloatingPanel] = None
 
         # Restore window + dock layout from QSettings (must come AFTER objectNames are set).
         s = QSettings(ORG_NAME, APP_NAME)
@@ -328,9 +333,15 @@ class MainWindow(QMainWindow):
             self._overlay_active = True
             self._saved_geom = self.saveGeometry()
 
-            self._was_source_visible = self.source_dock.isVisible()
+            # Overlay-only build: the overlay IS the app, so the essential panels
+            # must always appear — otherwise (e.g. when booting straight into
+            # overlay with docks hidden from restored state) the user gets no
+            # Sources panel and nowhere to paste a link / search / open a file.
+            # Sources + Playback are always floated; Watch follows prior state
+            # (it's only meaningful inside a watch-together room).
+            self._was_source_visible = True
+            self._was_playback_visible = True
             self._was_watch_visible = self.watch_dock.isVisible()
-            self._was_playback_visible = self.playback_dock.isVisible()
 
             # Remember + un-float docks BEFORE hiding so floating docks don't remain
             # as separate top-level windows (which is what caused the double panels).
@@ -340,9 +351,11 @@ class MainWindow(QMainWindow):
                     dock.setFloating(False)
                 dock.setVisible(False)
 
-            exit_overlay = lambda: self.set_overlay_mode(False)
+            # Overlay-only build: there is no windowed mode to return to, so the
+            # exit button quits the app entirely.
+            exit_overlay = lambda: self.close()
             # ✕ on a floating panel just HIDES that panel — does not exit overlay.
-            # The "Leave Overlay" button in the overlay controls is the only exit.
+            # The exit button in the overlay controls is the only way out (quit).
             def _hide_panel(panel):
                 panel.hide()
 
@@ -490,8 +503,38 @@ class MainWindow(QMainWindow):
                 fp.setWindowOpacity(op)
 
     def _overlay_to_profile(self) -> None:
-        self.set_overlay_mode(False)
-        self.set_mode(0)
+        """Open the profile as its own floating overlay panel.
+
+        Overlay-only build: profile is just another floating panel — opening it
+        never drops the app into a separate windowed mode.
+        """
+        if self._float_profile is not None:
+            self._float_profile.show()
+            self._float_profile.raise_()
+            self._float_profile.activateWindow()
+            return
+        if self.stack.indexOf(self.profile_page) != -1:
+            self.stack.removeWidget(self.profile_page)
+        self._float_profile = FloatingPanel("Profile", self.profile_page)
+        self._float_profile.closed.connect(self._close_profile_panel)
+        screen = QApplication.primaryScreen().availableGeometry()
+        self._float_profile.show_with_geometry(
+            screen.x() + 80, screen.y() + 60, 900, 640)
+        uid = current_user_id()
+        if uid:
+            self.profile_page.profile_view.load(uid)
+            self.profile_page.friends.refresh()
+
+    def _close_profile_panel(self) -> None:
+        """Re-dock the profile page when its floating panel is ✕'d."""
+        if self._float_profile is None:
+            return
+        pg = self._float_profile.take_content()
+        if self.stack.indexOf(pg) == -1:
+            self.stack.insertWidget(0, pg)
+        self._float_profile.hide()
+        self._float_profile.deleteLater()
+        self._float_profile = None
 
     def _show_overlay_panel(self, key: str) -> None:
         """Bring back a floating panel the user previously ✕'d in overlay."""
@@ -550,6 +593,32 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
 
+def _make_splash() -> Optional[QLabel]:
+    """Frameless, centered, always-on-top animated splash (assets/splash.gif).
+
+    Returns the splash widget (still running) or None if the gif is missing.
+    Caller is responsible for showing it, waiting, and closing it.
+    """
+    gif = ASSETS_DIR / "splash.gif"
+    if not gif.exists():
+        return None
+    lbl = QLabel(None)
+    lbl.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.SplashScreen)
+    lbl.setAttribute(Qt.WA_TranslucentBackground, True)
+    lbl.setAttribute(Qt.WA_DeleteOnClose, True)
+    movie = QMovie(str(gif))
+    lbl.setMovie(movie)
+    movie.jumpToFrame(0)
+    sz = movie.currentPixmap().size()
+    if sz.isValid() and not sz.isEmpty():
+        lbl.resize(sz)
+    lbl._movie = movie  # keep a reference alive on the widget
+    movie.start()
+    scr = QApplication.primaryScreen().availableGeometry()
+    lbl.move(scr.center().x() - lbl.width() // 2, scr.center().y() - lbl.height() // 2)
+    return lbl
+
+
 def main() -> int:
     app = QApplication(sys.argv)
     app.setOrganizationName(ORG_NAME); app.setApplicationName(APP_NAME)
@@ -557,6 +626,15 @@ def main() -> int:
 
     # Kick off yt-dlp install/update in background (non-blocking)
     QTimer.singleShot(0, ytdlp_manager.maybe_update_async)
+
+    # Splash (first 3s of the intro video, as an animated GIF) on launch.
+    splash = _make_splash()
+    if splash is not None:
+        splash.show()
+        loop = QEventLoop()
+        QTimer.singleShot(3000, loop.quit)
+        loop.exec()
+        splash.close()
 
     # Auth
     if not try_restore_session():
@@ -573,8 +651,11 @@ def main() -> int:
         except Exception:
             apply_theme(DEFAULT_COLORS)
 
+    # Overlay-only build: boot straight into the floating overlay (over your
+    # game). The windowed/docked profile+player mode no longer launches.
     w = MainWindow()
     w.show()
+    QTimer.singleShot(0, lambda: w.set_overlay_mode(True))
     return app.exec()
 
 

@@ -12,16 +12,35 @@ SUPABASE_PUBLISHABLE_KEY = "sb_publishable_ghWEVDYjfexgOokhwXebLA_BH6iHkUW"
 
 # ====== Paths ======
 def _app_root() -> Path:
+    """Writable app dir (next to the exe when frozen). Used for ytdlp/, which the
+    app downloads/updates at runtime and so must be a real on-disk location."""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
     return Path(__file__).resolve().parent.parent
 
+
+def _resource_root() -> Path:
+    """Read-only bundled-resource dir. For a PyInstaller one-file build this is
+    the temp extraction dir (sys._MEIPASS); otherwise it's the app root. Bundled
+    data (e.g. assets/splash.gif) lives here, NOT next to the exe."""
+    mp = getattr(sys, "_MEIPASS", None)
+    if mp:
+        return Path(mp)
+    return _app_root()
+
+
 APP_ROOT: Path = _app_root()
+RESOURCE_ROOT: Path = _resource_root()
 YTDLP_DIR: Path = APP_ROOT / "ytdlp"
 YTDLP_EXE: Path = YTDLP_DIR / "yt-dlp.exe"
 YTDLP_DIR.mkdir(parents=True, exist_ok=True)
 
-ASSETS_DIR: Path = APP_ROOT / "assets"
+# Assets are bundled read-only resources → resolve from RESOURCE_ROOT so the
+# splash GIF and icons are found inside the frozen exe (sys._MEIPASS), with a
+# fallback to a sibling assets/ folder for dev / loose-file runs.
+ASSETS_DIR: Path = RESOURCE_ROOT / "assets"
+if not ASSETS_DIR.exists() and (APP_ROOT / "assets").exists():
+    ASSETS_DIR = APP_ROOT / "assets"
 
 # ====== App ======
 APP_NAME = "NoMansMovies"
