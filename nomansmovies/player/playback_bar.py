@@ -1,13 +1,13 @@
 """Dedicated playback controls — always visible, never relies on hover.
 
-Layout:
-    [00:00]  [============ scrubber ============]  [12:34]
-    [⏹] [⏪ 10s] [⏵/⏸] [10s ⏩] [⏭]  [🔊 vol]   [🔄 Resync]  [⚙]  [⛶]
+Designed to shrink gracefully: buttons have only a minimum width (small),
+volume slider has expanding policy with a minimum, and the resync / settings
+chips can shrink to icons when space is tight.
 """
 from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QSlider, QLabel
+    QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QSlider, QLabel, QSizePolicy
 )
 
 
@@ -34,23 +34,29 @@ class PlaybackControlsBar(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(110)
+        # Minimum is intentionally tiny so the bar can shrink very small.
+        self.setMinimumHeight(72)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
-        outer = QVBoxLayout(self); outer.setContentsMargins(10, 8, 10, 10); outer.setSpacing(6)
+        outer = QVBoxLayout(self); outer.setContentsMargins(6, 6, 6, 8); outer.setSpacing(4)
 
         # ---- Row 1: scrubber + times ----
-        srow = QHBoxLayout(); srow.setSpacing(8)
+        srow = QHBoxLayout(); srow.setSpacing(4)
         self.cur_lbl = QLabel("0:00")
-        self.cur_lbl.setFixedWidth(70); self.cur_lbl.setAlignment(Qt.AlignCenter)
+        self.cur_lbl.setMinimumWidth(0); self.cur_lbl.setAlignment(Qt.AlignCenter)
+        self.cur_lbl.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.cur_lbl.setStyleSheet("font-family: 'Consolas', monospace; font-weight: 600;")
 
         self.scrubber = QSlider(Qt.Horizontal)
         self.scrubber.setRange(0, 0)
+        self.scrubber.setMinimumWidth(40)
+        self.scrubber.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.scrubber.sliderMoved.connect(self._user_scrub)
         self.scrubber.sliderReleased.connect(self._user_release)
 
         self.tot_lbl = QLabel("0:00")
-        self.tot_lbl.setFixedWidth(70); self.tot_lbl.setAlignment(Qt.AlignCenter)
+        self.tot_lbl.setMinimumWidth(0); self.tot_lbl.setAlignment(Qt.AlignCenter)
+        self.tot_lbl.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.tot_lbl.setStyleSheet("font-family: 'Consolas', monospace; font-weight: 600;")
 
         srow.addWidget(self.cur_lbl)
@@ -59,50 +65,54 @@ class PlaybackControlsBar(QWidget):
         outer.addLayout(srow)
 
         # ---- Row 2: buttons + volume + resync + settings ----
-        brow = QHBoxLayout(); brow.setSpacing(6)
+        brow = QHBoxLayout(); brow.setSpacing(2)
 
-        def mk(text: str, tip: str, w: int | None = None, accent: bool = False) -> QPushButton:
+        def mk(text: str, tip: str, accent: bool = False) -> QPushButton:
             b = QPushButton(text); b.setToolTip(tip)
-            b.setMinimumHeight(32)
-            if w: b.setFixedWidth(w)
+            b.setMinimumHeight(28)
+            b.setMinimumWidth(0)
+            # Ignored width policy = layout treats this button's preferred width
+            # as just a hint; it'll shrink as small as needed (icon stays visible).
+            b.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            b.setStyleSheet("QPushButton { padding: 4px 6px; }")
             if accent: b.setProperty("accent", True)
             return b
 
-        self.stop_btn = mk("⏹", "Stop", 46)
+        # Transport — every button is uniformly shrinkable.
+        self.stop_btn = mk("⏹", "Stop")
         self.stop_btn.clicked.connect(self.stop)
-        self.rew_btn  = mk("⏪ 10s", "Rewind 10 seconds", 84)
+        self.rew_btn  = mk("⏪", "Rewind 10 seconds")
         self.rew_btn.clicked.connect(self.rewind)
-        self.play_btn = mk("⏵", "Play / Pause", 60, accent=True)
+        self.play_btn = mk("⏵", "Play / Pause", accent=True)
         self.play_btn.clicked.connect(self.play_pause)
-        self.ff_btn   = mk("10s ⏩", "Forward 10 seconds", 84)
+        self.ff_btn   = mk("⏩", "Forward 10 seconds")
         self.ff_btn.clicked.connect(self.forward)
-        self.next_btn = mk("⏭", "Next", 46)
+        self.next_btn = mk("⏭", "Next")
         self.next_btn.clicked.connect(self.next_)
-
         for b in (self.stop_btn, self.rew_btn, self.play_btn, self.ff_btn, self.next_btn):
-            brow.addWidget(b)
-        brow.addSpacing(12)
+            # Give them equal stretch so they share the available width evenly.
+            brow.addWidget(b, 1)
 
-        brow.addWidget(QLabel("🔊"))
+        self.vol_lbl = QLabel("🔊"); self.vol_lbl.setMinimumWidth(0)
+        brow.addWidget(self.vol_lbl)
         self.vol = QSlider(Qt.Horizontal); self.vol.setRange(0, 100); self.vol.setValue(85)
-        self.vol.setFixedWidth(110)
+        self.vol.setMinimumWidth(30)
+        self.vol.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.vol.valueChanged.connect(self.volume)
-        brow.addWidget(self.vol)
+        brow.addWidget(self.vol, 2)
 
-        brow.addStretch(1)
-
-        self.resync_btn = mk("🔄 Resync", "Resync playback with everyone in your watch room", 110)
+        self.resync_btn = mk("🔄", "Resync playback with everyone in your watch room")
         self.resync_btn.setEnabled(False)
         self.resync_btn.clicked.connect(self.resync)
-        brow.addWidget(self.resync_btn)
+        brow.addWidget(self.resync_btn, 1)
 
-        self.settings_btn = mk("⚙", "Player settings (quality, aspect ratio)", 40)
+        self.settings_btn = mk("⚙", "Player settings (quality, aspect ratio)")
         self.settings_btn.clicked.connect(self.settings)
-        brow.addWidget(self.settings_btn)
+        brow.addWidget(self.settings_btn, 1)
 
-        self.fs_btn = mk("⛶", "Fullscreen", 40)
+        self.fs_btn = mk("⛶", "Fullscreen")
         self.fs_btn.clicked.connect(self.fullscreen)
-        brow.addWidget(self.fs_btn)
+        brow.addWidget(self.fs_btn, 1)
 
         outer.addLayout(brow)
         self._scrubbing = False

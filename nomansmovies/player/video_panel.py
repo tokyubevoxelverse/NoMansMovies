@@ -42,9 +42,12 @@ class VideoPanel(QWidget):
         self.setMinimumSize(320, 180)
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        # Solid black background under letterboxed video — never let the parent bleed through.
-        self.setAutoFillBackground(True)
-        self.setStyleSheet("VideoPanel { background-color: #000; }")
+        # autoFillBackground forces a SQUARE palette-coloured fill that ignores
+        # border-radius — keep it OFF so QSS rounded corners actually clip.
+        self.setAutoFillBackground(False)
+        self.setObjectName("nmmVideoPanel")
+        # ID selector beats the broad QWidget rule from theme.py.
+        self.setStyleSheet("QWidget#nmmVideoPanel { background-color: #000; }")
 
         self._player = QMediaPlayer(self)
         self._audio = QAudioOutput(self); self._audio.setVolume(0.85)
@@ -99,6 +102,28 @@ class VideoPanel(QWidget):
         self._last_host_pos_ms: int | None = None
         self._last_host_playing: bool | None = None
 
+    def apply_border(self, enabled: bool, color: str, width: int,
+                     rounded: bool, radius: int) -> None:
+        """Decorative border around the video.
+
+        QVideoWidget uses a native Win32 surface that can't be painted over with
+        a Qt border, so we fake it: VideoPanel itself paints a colored background,
+        and we inset the QVideoWidget with layout margins of `width` px. Rounded
+        corners apply to the OUTER frame only (the inner video stays rectangular)."""
+        w = max(0, int(width))
+        r = max(0, int(radius)) if rounded else 0
+        if enabled and w > 0:
+            self.layout().setContentsMargins(w, w, w, w)
+            radius_css = f"border-radius: {r}px;" if rounded else ""
+            self.setStyleSheet(
+                f"QWidget#nmmVideoPanel {{ background-color: {color}; {radius_css} }}"
+            )
+        else:
+            self.layout().setContentsMargins(0, 0, 0, 0)
+            self.setStyleSheet("QWidget#nmmVideoPanel { background-color: #000; }")
+        # Reposition the overlay so the controls don't sit over the border strip.
+        QTimer.singleShot(0, self._position_overlay)
+
     def refresh_video_sink(self) -> None:
         """Call after the panel has been reparented — re-attaches the video output
         so the QVideoWidget keeps painting in its new native window."""
@@ -118,11 +143,34 @@ class VideoPanel(QWidget):
         self.source_changed.emit(kind, self._original_url or url)
 
     def load_youtube(self, page_url: str) -> None:
-        """Extract a stream URL with yt-dlp and play it."""
+        """Extract a stream URL with yt-dlp and play it. If yt-dlp can't extract
+        (usually because YouTube changed something and the local yt-dlp is out
+        of date), force an update and retry once; if that still fails, surface
+        a real error dialog so the user knows."""
         self._original_url = page_url
         self._current_kind = "youtube"
         url = ytdlp_manager.extract_stream_url(page_url, self._quality)
         if not url:
+            # Force-update yt-dlp synchronously and try once more.
+            try:
+                ytdlp_manager.update()
+            except Exception:
+                pass
+            url = ytdlp_manager.extract_stream_url(page_url, self._quality)
+        if not url:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self, "YouTube playback failed",
+                "Could not extract a playable stream from that YouTube link.\n\n"
+                "Things to check:\n"
+                "  • You're connected to the internet (YouTube playback requires it — "
+                "direct mp4 links and local files don't).\n"
+                "  • The video isn't age-restricted or region-blocked.\n"
+                "  • Try a different quality from the ⚙ Settings menu.\n\n"
+                "If many videos fail, your bundled yt-dlp may be outdated. "
+                "Delete the file at MoviePlugin\\ytdlp\\yt-dlp.exe and relaunch "
+                "to download a fresh copy."
+            )
             return
         self._player.setSource(QUrl(url))
         self._player.play()

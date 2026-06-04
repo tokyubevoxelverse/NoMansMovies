@@ -123,13 +123,25 @@ def search_youtube(query: str, n: int = 5) -> List[dict]:
         except Exception:
             continue
         vid = j.get("id") or ""
+        # With --flat-playlist yt-dlp often returns just the video ID in `url`,
+        # which extract_stream_url won't recognize. Always prefer building the
+        # full watch URL from the id when we have one.
+        raw_url = j.get("url") or ""
+        if vid:
+            full_url = f"https://www.youtube.com/watch?v={vid}"
+        elif raw_url.startswith(("http://", "https://")):
+            full_url = raw_url
+        elif raw_url:
+            full_url = f"https://www.youtube.com/watch?v={raw_url}"
+        else:
+            full_url = ""
         results.append({
             "title": j.get("title") or "(untitled)",
             "channel": j.get("uploader") or j.get("channel") or "",
             "duration": j.get("duration"),
             "thumbnail": j.get("thumbnail") or (f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg" if vid else ""),
             "id": vid,
-            "url": j.get("url") or (f"https://www.youtube.com/watch?v={vid}" if vid else ""),
+            "url": full_url,
             "description": j.get("description") or "",
         })
         if len(results) >= n:

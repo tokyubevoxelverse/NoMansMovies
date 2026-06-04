@@ -38,6 +38,9 @@ class ControlsOverlay(QWidget):
         # a native window so it doesn't deliver Enter events to Qt event filters;
         # making this overlay cover the whole panel lets US drive the hover logic.
         self.setAttribute(Qt.WA_NoMousePropagation, False)
+        # Override theme.py's broad `QWidget { background-color }` rule, which
+        # would otherwise paint a solid theme bg over the video border area.
+        self.setObjectName("nmmControlsOverlay")
 
         lay = QVBoxLayout(self); lay.setContentsMargins(16, 8, 16, 12); lay.setSpacing(4)
         lay.addStretch(1)  # pushes the controls to the bottom
@@ -134,6 +137,9 @@ class ControlsOverlay(QWidget):
         # theme's foreground may be dark (e.g., Daylight theme) which would be unreadable.
         accent = c.get("accent", "#e50914")
         self.setStyleSheet(
+            # CRITICAL: overlay itself must be transparent so the video border
+            # underneath is visible. The bottom gradient is painted in paintEvent.
+            "QWidget#nmmControlsOverlay { background: transparent; }"
             "QLabel { color: #ffffff; background: transparent; font-weight: 600; }"
             "QPushButton[overlayBtn=\"std\"] { background: rgba(255,255,255,0.18); color: #ffffff; "
             "border: 1px solid rgba(255,255,255,0.25); border-radius: 6px; padding: 6px 10px; "

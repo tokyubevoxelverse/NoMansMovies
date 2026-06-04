@@ -1,16 +1,21 @@
 """NoMansMovies — entry point."""
 from __future__ import annotations
 import sys
-from typing import Dict, Optional
-from PySide6.QtCore import Qt, QSettings, QTimer, QPoint, QSize, QEventLoop
-from PySide6.QtGui import QMovie
+import time
+from typing import Dict, Optional, List
+from PySide6.QtCore import Qt, QSettings, QTimer, QPoint, QSize, QEventLoop, QEvent
+from PySide6.QtGui import QMovie, QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QStackedWidget, QWidget, QHBoxLayout, QVBoxLayout,
-    QLabel, QMessageBox
+    QLabel, QLineEdit, QTextEdit, QPlainTextEdit, QMessageBox
 )
 
 from . import ytdlp_manager
-from .config import APP_NAME, ORG_NAME, DEFAULT_COLORS, ASSETS_DIR
+from .config import (
+    APP_NAME, ORG_NAME, DEFAULT_COLORS, ASSETS_DIR,
+    LAYOUTS, LAYOUT_LABELS, LAYOUT_DEFAULT, LAYOUT_MOVIE_SOURCES, LAYOUT_MOVIE_ONLY,
+    CUSTOM_LAYOUT_PREFIX, MAX_CUSTOM_LAYOUTS,
+)
 from .theme import apply_theme
 from .supabase_client import supabase, try_restore_session, clear_session, current_user_id
 
@@ -28,6 +33,12 @@ from .widgets.bottom_bar import BottomBar
 from .widgets.collapsible_dock import CollapsibleDock
 from .widgets.floating_panel import FloatingPanel
 from .widgets.overlay_controls import OverlayControls
+from .widgets.appearance_panel import AppearancePanel
+from .widgets.controls_help import ControlsHelpPanel
+from .discord_presence import DiscordPresence
+from .presence import PresenceTracker
+from .widgets.invite_toast import InviteToast
+from .messaging.chat_window import JOIN_SCHEME
 
 
 class ProfilePage(QWidget):
@@ -127,15 +138,40 @@ class MainWindow(QMainWindow):
         self._float_watch: Optional[FloatingPanel] = None
         self._float_playback: Optional[FloatingPanel] = None
         self._float_controls: Optional[FloatingPanel] = None
+        self._float_appearance: Optional[FloatingPanel] = None
+        self._overlay_controls: Optional[OverlayControls] = None
         self._was_source_visible = False
         self._was_watch_visible = False
         self._was_playback_visible = False
         # Remember floating state of docks so we can restore on exit overlay.
         self._dock_was_floating: Dict[CollapsibleDock, bool] = {}
+
+        # Layout state — current layout key + saved per-layout snapshot of which
+        # panels were visible before triple-9 / Cycle Layouts changed things.
+        self._current_layout: str = LAYOUT_DEFAULT
+        self._previous_layout: str = LAYOUT_DEFAULT
+
+        # Triple-9 hotkey for cinema mode (Movie only).
+        self._key9_presses: List[float] = []
+        QApplication.instance().installEventFilter(self)
+
+        # Discord Rich Presence — only connects if the user linked Discord.
+        self._discord = DiscordPresence()
+        QTimer.singleShot(500, self._maybe_start_discord_presence)
+        self.video_panel.source_changed.connect(self._on_source_changed_for_presence)
+
+        # Supabase online presence — broadcasts that I'm online and tracks who else is.
+        self._presence = PresenceTracker()
+        self._presence.online_changed.connect(self._on_online_changed)
+        QTimer.singleShot(0, self._start_online_presence)
+
+        # Incoming-message subscription for invite toasts.
+        self._inbox_channel = None
+        self._active_toasts: list = []
+        QTimer.singleShot(0, self._subscribe_incoming_messages)
         # Overlay-only build: profile opens as its own floating panel (never a
         # separate windowed mode). _saved_flags is referenced by closeEvent.
         self._saved_flags = None
-        self._float_profile: Optional[FloatingPanel] = None
 
         # Restore window + dock layout from QSettings (must come AFTER objectNames are set).
         s = QSettings(ORG_NAME, APP_NAME)
@@ -403,17 +439,23 @@ class MainWindow(QMainWindow):
                     screen_geom.bottom() - 290, 820, 130,
                 ), s)
 
-            # --- overlay controls (small floating bar with Leave Overlay) ---
+            # --- overlay controls (floating bar) ---
             controls = OverlayControls()
-            controls.exit_overlay.connect(exit_overlay)
-            controls.profile_clicked.connect(self._overlay_to_profile)
+            controls.profile_clicked.connect(self._open_appearance_panel)
             controls.opacity_changed.connect(self._set_overlay_opacity)
             controls.recenter_video.connect(self._recenter_video)
-            controls.show_panel.connect(self._show_overlay_panel)
+            controls.cycle_layout.connect(self._cycle_layout)
+            controls.show_all_panels.connect(self._show_all_overlay_panels)
+            controls.restore_all_panels.connect(self._restore_all_overlay_panels)
+            controls.save_layout.connect(self._save_custom_layout)
+            controls.minimize_all.connect(self._minimize_all_overlay)
+            controls.show_controls_help.connect(self._open_controls_help)
+            controls.set_layout_label(self._current_layout)
+            self._overlay_controls = controls
             self._float_controls = FloatingPanel("NoMansMovies", controls)
-            self._float_controls.setMinimumSize(640, 130)
-            # No ✕ on the controls panel — Leave Overlay is the only exit.
-            self._float_controls.hide_close_button()
+            self._float_controls.setMinimumSize(560, 130)
+            # ✕ on the controls panel = quit app (overlay-only build, no windowed mode).
+            self._float_controls.closed.connect(QApplication.instance().quit)
             self._restore_panel(self._float_controls, "controls", (
                 screen_geom.x() + (screen_geom.width() - 760) // 2,
                 screen_geom.bottom() - 150, 760, 130,
@@ -457,6 +499,11 @@ class MainWindow(QMainWindow):
             if self._float_controls:
                 self._float_controls.hide(); self._float_controls.deleteLater()
                 self._float_controls = None
+                self._overlay_controls = None
+
+            if self._float_appearance:
+                self._float_appearance.hide(); self._float_appearance.deleteLater()
+                self._float_appearance = None
 
             # Restore the original dock visibility + floating state.
             self.source_dock.setVisible(self._was_source_visible)
@@ -478,11 +525,12 @@ class MainWindow(QMainWindow):
         """Persist overlay layout as plain ints + bool. QPoint/QSize round-trip via
         QSettings has been flaky on some Windows installs — ints always work."""
         for key, fp in [
-            ("video",    self._float_video),
-            ("source",   self._float_source),
-            ("watch",    self._float_watch),
-            ("playback", self._float_playback),
-            ("controls", self._float_controls),
+            ("video",      self._float_video),
+            ("source",     self._float_source),
+            ("watch",      self._float_watch),
+            ("playback",   self._float_playback),
+            ("controls",   self._float_controls),
+            ("appearance", self._float_appearance),
         ]:
             if fp is None:
                 continue
@@ -498,59 +546,387 @@ class MainWindow(QMainWindow):
 
     def _set_overlay_opacity(self, v: int) -> None:
         op = max(0.30, min(1.0, v / 100.0))
-        for fp in (self._float_video, self._float_source, self._float_watch, self._float_controls):
+        # The video panel ALWAYS stays fully opaque — translucent video on a
+        # game background reads as garbage.
+        if self._float_video is not None:
+            self._float_video.setWindowOpacity(1.0)
+        for fp in (self._float_source, self._float_watch, self._float_playback,
+                   self._float_controls, self._float_appearance):
             if fp is not None:
                 fp.setWindowOpacity(op)
 
-    def _overlay_to_profile(self) -> None:
-        """Open the profile as its own floating overlay panel.
+    # ============ triple-9 cinema-mode hotkey ============
+    def eventFilter(self, obj, e):
+        if e.type() == QEvent.KeyPress and e.key() == Qt.Key_9:
+            focused = QApplication.focusWidget()
+            if not isinstance(focused, (QLineEdit, QTextEdit, QPlainTextEdit)):
+                now = time.monotonic()
+                self._key9_presses = [t for t in self._key9_presses if now - t < 1.0]
+                self._key9_presses.append(now)
+                if len(self._key9_presses) >= 3:
+                    self._key9_presses.clear()
+                    if self._current_layout == LAYOUT_MOVIE_ONLY:
+                        self._apply_layout(self._previous_layout or LAYOUT_DEFAULT)
+                    else:
+                        self._previous_layout = self._current_layout
+                        self._apply_layout(LAYOUT_MOVIE_ONLY)
+        return super().eventFilter(obj, e)
 
-        Overlay-only build: profile is just another floating panel — opening it
-        never drops the app into a separate windowed mode.
-        """
-        if self._float_profile is not None:
-            self._float_profile.show()
-            self._float_profile.raise_()
-            self._float_profile.activateWindow()
+    # ============ layouts ============
+    def _apply_layout(self, layout: str) -> None:
+        # Custom slots: load saved per-panel geometry + visibility for that slot.
+        if isinstance(layout, str) and layout.startswith(CUSTOM_LAYOUT_PREFIX):
+            if self._overlay_active:
+                slot = layout[len(CUSTOM_LAYOUT_PREFIX):]
+                s = QSettings(ORG_NAME, APP_NAME)
+                for key, fp in (("video", self._float_video), ("source", self._float_source),
+                                ("watch", self._float_watch), ("playback", self._float_playback),
+                                ("controls", self._float_controls), ("appearance", self._float_appearance)):
+                    if fp is None: continue
+                    visible = self._read_bool(s, f"layouts/{slot}/{key}_visible", True)
+                    x = self._read_int(s, f"layouts/{slot}/{key}_x", fp.x())
+                    y = self._read_int(s, f"layouts/{slot}/{key}_y", fp.y())
+                    w = self._read_int(s, f"layouts/{slot}/{key}_w", fp.width())
+                    h = self._read_int(s, f"layouts/{slot}/{key}_h", fp.height())
+                    minimized = self._read_bool(s, f"layouts/{slot}/{key}_minimized", False)
+                    if visible:
+                        fp.show_with_geometry(x, y, w, h)
+                        fp.apply_minimized(minimized)
+                    else:
+                        fp.hide()
+                if self._float_video is not None:
+                    self.video_panel.refresh_video_sink()
+            self._current_layout = layout
+            if self._overlay_controls is not None:
+                self._overlay_controls.set_layout_label(layout)
             return
-        if self.stack.indexOf(self.profile_page) != -1:
-            self.stack.removeWidget(self.profile_page)
-        self._float_profile = FloatingPanel("Profile", self.profile_page)
-        self._float_profile.closed.connect(self._close_profile_panel)
+
+        if layout not in LAYOUTS:
+            return
+        self._current_layout = layout
+        wants = {
+            LAYOUT_DEFAULT:       {"video": True,  "source": True,  "watch": True,  "playback": True},
+            LAYOUT_MOVIE_SOURCES: {"video": True,  "source": True,  "watch": False, "playback": True},
+            LAYOUT_MOVIE_ONLY:    {"video": True,  "source": False, "watch": False, "playback": False},
+        }[layout]
+
+        if self._overlay_active:
+            for key, fp in (("video", self._float_video), ("source", self._float_source),
+                            ("watch", self._float_watch), ("playback", self._float_playback)):
+                if fp is None: continue
+                fp.show() if wants[key] else fp.hide()
+            # Controls panel always visible so the user can navigate back out.
+            if self._float_controls: self._float_controls.show()
+        else:
+            self.video_panel.setVisible(wants["video"])
+            self.source_dock.setVisible(wants["source"])
+            self.watch_dock.setVisible(wants["watch"])
+            self.playback_dock.setVisible(wants["playback"])
+
+        if self._overlay_controls is not None:
+            self._overlay_controls.set_layout_label(layout)
+
+    def _all_layouts(self) -> list:
+        """Built-ins followed by any saved Custom slots."""
+        s = QSettings(ORG_NAME, APP_NAME)
+        count = self._read_int(s, "layouts/custom_count", 0)
+        return list(LAYOUTS) + [f"{CUSTOM_LAYOUT_PREFIX}{i}" for i in range(1, count + 1)]
+
+    def _cycle_layout(self) -> None:
+        order = self._all_layouts()
+        try:
+            idx = order.index(self._current_layout)
+        except ValueError:
+            idx = 0
+        self._apply_layout(order[(idx + 1) % len(order)])
+
+    def _show_all_overlay_panels(self) -> None:
+        """Show every hidden floating panel (does NOT change positions)."""
+        for fp in (self._float_video, self._float_source, self._float_watch,
+                   self._float_playback, self._float_controls):
+            if fp is not None:
+                fp.show()
+                fp.raise_()
+        if self._float_video is not None:
+            self.video_panel.refresh_video_sink()
+        self._current_layout = LAYOUT_DEFAULT
+        if self._overlay_controls is not None:
+            self._overlay_controls.set_layout_label(LAYOUT_DEFAULT)
+
+    def _restore_all_overlay_panels(self) -> None:
+        """Reset every floating panel to its default size and position, and show it."""
+        if not self._overlay_active:
+            return
         screen = QApplication.primaryScreen().availableGeometry()
-        self._float_profile.show_with_geometry(
-            screen.x() + 80, screen.y() + 60, 900, 640)
+        defaults = {
+            self._float_video: (
+                screen.x() + (screen.width() - 1024) // 2,
+                screen.y() + (screen.height() - 600) // 2, 1024, 600),
+            self._float_source:   (screen.x() + 30, screen.y() + 80, 320, 560),
+            self._float_watch:    (screen.right() - 330, screen.y() + 80, 300, 560),
+            self._float_playback: (
+                screen.x() + (screen.width() - 820) // 2,
+                screen.bottom() - 290, 820, 130),
+            self._float_controls: (
+                screen.x() + (screen.width() - 760) // 2,
+                screen.bottom() - 150, 760, 130),
+        }
+        for fp, geom in defaults.items():
+            if fp is None: continue
+            if fp.minimized:
+                fp.apply_minimized(False)
+            x, y, w, h = geom
+            fp.show_with_geometry(x, y, w, h)
+        if self._float_video is not None:
+            self.video_panel.refresh_video_sink()
+        self._current_layout = LAYOUT_DEFAULT
+        if self._overlay_controls is not None:
+            self._overlay_controls.set_layout_label(LAYOUT_DEFAULT)
+
+    # ============ profile + appearance panel ============
+    def _open_appearance_panel(self) -> None:
+        if self._float_appearance is not None and self._float_appearance.isVisible():
+            self._float_appearance.raise_(); self._float_appearance.activateWindow(); return
+        if self._float_appearance is None:
+            ap = AppearancePanel()
+            ap.saved.connect(self._on_appearance_saved)
+            ap.logout_requested.connect(self._on_logout)
+            ap.border_changed.connect(self._apply_video_border)
+            self._float_appearance = FloatingPanel("Profile & Appearance", ap)
+            self._float_appearance.setMinimumSize(720, 520)
+            screen = QApplication.primaryScreen().availableGeometry()
+            s = QSettings(ORG_NAME, APP_NAME)
+            self._restore_panel(self._float_appearance, "appearance", (
+                screen.x() + (screen.width() - 980) // 2,
+                screen.y() + (screen.height() - 660) // 2, 980, 660,
+            ), s)
+        else:
+            self._float_appearance.show()
+        self._float_appearance.raise_()
+
+    def _apply_video_border(self, payload: dict) -> None:
+        try:
+            self.video_panel.apply_border(
+                bool(payload.get("enabled")),
+                str(payload.get("color") or "#e50914"),
+                int(payload.get("width") or 4),
+                bool(payload.get("rounded")),
+                int(payload.get("radius") or 0),
+            )
+        except Exception:
+            pass
+
+    def _on_logout(self) -> None:
+        """Sign out and quit the app — main.py's startup handles relaunch via login dialog."""
+        try:
+            supabase().auth.sign_out()
+        except Exception:
+            pass
+        clear_session()
+        QMessageBox.information(
+            self, "Logged out",
+            "You've been signed out. Relaunch NoMansMovies to log back in.")
+        QApplication.instance().quit()
+
+    def _on_appearance_saved(self) -> None:
+        # Theme is already applied app-wide by AppearancePanel — no modal needed.
+        # (Showing a QMessageBox parented to a hidden window during overlay mode
+        # can block input on some setups.)
+        pass
+
+    def _open_controls_help(self) -> None:
+        """Open the Controls cheatsheet in its own floating panel."""
+        if getattr(self, "_float_help", None) is not None and self._float_help.isVisible():
+            self._float_help.raise_(); self._float_help.activateWindow(); return
+        if getattr(self, "_float_help", None) is None:
+            help_widget = ControlsHelpPanel()
+            self._float_help = FloatingPanel("Controls", help_widget)
+            self._float_help.setMinimumSize(480, 400)
+            screen = QApplication.primaryScreen().availableGeometry()
+            self._float_help.show_with_geometry(
+                screen.x() + (screen.width() - 620) // 2,
+                screen.y() + (screen.height() - 720) // 2, 620, 720,
+            )
+        else:
+            self._float_help.show()
+        self._float_help.raise_()
+
+    def _minimize_all_overlay(self) -> None:
+        """Hide every floating panel and put MainWindow in the taskbar (minimized).
+        Clicking the taskbar icon triggers changeEvent → we restore the panels."""
+        if not self._overlay_active:
+            return
+        self._minimized_panel_state: Dict[str, bool] = {}
+        for key, fp in [("video", self._float_video), ("source", self._float_source),
+                        ("watch", self._float_watch), ("playback", self._float_playback),
+                        ("controls", self._float_controls), ("appearance", self._float_appearance)]:
+            if fp is not None:
+                self._minimized_panel_state[key] = fp.isVisible()
+                fp.hide()
+        self._panels_in_tray = True
+        self.showMinimized()
+
+    def changeEvent(self, e):
+        if (e.type() == QEvent.WindowStateChange
+                and getattr(self, "_panels_in_tray", False)
+                and not (self.windowState() & Qt.WindowMinimized)):
+            # User clicked the taskbar icon — restore the floating panels.
+            self._panels_in_tray = False
+            for key, was_visible in (self._minimized_panel_state or {}).items():
+                if not was_visible:
+                    continue
+                fp = {
+                    "video":      self._float_video,
+                    "source":     self._float_source,
+                    "watch":      self._float_watch,
+                    "playback":   self._float_playback,
+                    "controls":   self._float_controls,
+                    "appearance": self._float_appearance,
+                }.get(key)
+                if fp is not None:
+                    fp.show(); fp.raise_()
+            if self._float_video is not None:
+                self.video_panel.refresh_video_sink()
+            self._minimized_panel_state = None
+            # Hide MainWindow again — we only used it as a taskbar handle.
+            QTimer.singleShot(0, self.hide)
+        super().changeEvent(e)
+
+    # ============ Discord Rich Presence ============
+    def _maybe_start_discord_presence(self) -> None:
+        """Only connect if the user has linked their Discord (silent no-op if not)."""
+        uid = current_user_id()
+        if not uid:
+            return
+        try:
+            r = supabase().table("profiles").select("discord_id").eq("id", uid).single().execute()
+            linked = bool((r.data or {}).get("discord_id"))
+        except Exception:
+            linked = False
+        if linked:
+            self._discord.connect()
+
+    def _start_online_presence(self) -> None:
         uid = current_user_id()
         if uid:
-            self.profile_page.profile_view.load(uid)
-            self.profile_page.friends.refresh()
+            self._presence.connect(uid)
 
-    def _close_profile_panel(self) -> None:
-        """Re-dock the profile page when its floating panel is ✕'d."""
-        if self._float_profile is None:
+    def _subscribe_incoming_messages(self) -> None:
+        uid = current_user_id()
+        if not uid:
             return
-        pg = self._float_profile.take_content()
-        if self.stack.indexOf(pg) == -1:
-            self.stack.insertWidget(0, pg)
-        self._float_profile.hide()
-        self._float_profile.deleteLater()
-        self._float_profile = None
+        try:
+            ch = supabase().channel(f"inbox:{uid}")
+            def on_insert(payload):
+                row = (payload or {}).get("record") or (payload or {}).get("new") or {}
+                if not isinstance(row, dict):
+                    return
+                if row.get("recipient") != uid:
+                    return
+                body = str(row.get("body") or "")
+                if not body.startswith(JOIN_SCHEME):
+                    return
+                room_id = body[len(JOIN_SCHEME):].strip()
+                if not room_id:
+                    return
+                # Resolve sender's username for the toast.
+                sender_id = row.get("sender")
+                sender_label = "A friend"
+                try:
+                    r = supabase().table("profiles").select("username").eq("id", sender_id).single().execute()
+                    uname = (r.data or {}).get("username")
+                    if uname: sender_label = f"@{uname}"
+                except Exception:
+                    pass
+                QTimer.singleShot(0, lambda: self._show_invite_toast(sender_label, room_id))
+            try:
+                ch.on_postgres_changes(
+                    event="INSERT", schema="public", table="messages",
+                    callback=on_insert,
+                )
+            except TypeError:
+                ch.on_postgres_changes("INSERT", schema="public", table="messages", callback=on_insert)
+            ch.subscribe()
+            self._inbox_channel = ch
+        except Exception:
+            self._inbox_channel = None
 
-    def _show_overlay_panel(self, key: str) -> None:
-        """Bring back a floating panel the user previously ✕'d in overlay."""
-        target = {
-            "video":    self._float_video,
-            "source":   self._float_source,
-            "watch":    self._float_watch,
-            "playback": self._float_playback,
-        }.get(key)
-        if target is None:
+    def _show_invite_toast(self, sender_label: str, room_id: str) -> None:
+        toast = InviteToast(sender_label, room_id)
+        toast.accepted.connect(self.join_room_as_guest)
+        toast.accepted.connect(lambda *_: self._active_toasts.remove(toast) if toast in self._active_toasts else None)
+        toast.dismissed.connect(lambda: self._active_toasts.remove(toast) if toast in self._active_toasts else None)
+        # Stack multiple toasts vertically.
+        offset = sum(t.height() + 10 for t in self._active_toasts)
+        p = toast.pos(); toast.move(p.x(), p.y() + offset)
+        self._active_toasts.append(toast)
+        toast.show()
+
+    def _on_online_changed(self, ids) -> None:
+        try:
+            self.profile_page.friends.set_online_ids(ids)
+        except Exception:
+            pass
+        try:
+            self.watch_panel.set_online_ids(ids)
+        except Exception:
+            pass
+
+    def _on_source_changed_for_presence(self, kind: str, original: str) -> None:
+        # Try to find a friendlier label than the raw URL.
+        label = original or ""
+        if kind == "local":
+            label = label.replace("\\", "/").rsplit("/", 1)[-1]
+        elif kind == "youtube":
+            label = label.split("?", 1)[0].rsplit("/", 1)[-1]
+        self._discord.set_source(kind, label)
+
+    def _save_custom_layout(self) -> None:
+        """Save current panel geometry/visibility/minimized into a NEW Custom slot
+        (Custom 1 → Custom 9). Each save creates a new entry that shows up in the
+        cycler — older custom layouts are kept."""
+        if not self._overlay_active:
             return
-        target.show()
-        target.raise_()
-        target.activateWindow()
-        if key == "video":
-            self.video_panel.refresh_video_sink()
+        s = QSettings(ORG_NAME, APP_NAME)
+        # Also persist the standard auto-save so a restart-without-cycle still works.
+        self._save_overlay_layout(s)
+        count = self._read_int(s, "layouts/custom_count", 0)
+        if count >= MAX_CUSTOM_LAYOUTS:
+            # Roll over the oldest slot (slot 1) by shifting everything down.
+            for i in range(1, count):
+                self._copy_layout_slot(s, str(i + 1), str(i))
+            slot = str(count)
+        else:
+            count += 1
+            slot = str(count)
+            s.setValue("layouts/custom_count", count)
+
+        for key, fp in (("video", self._float_video), ("source", self._float_source),
+                        ("watch", self._float_watch), ("playback", self._float_playback),
+                        ("controls", self._float_controls), ("appearance", self._float_appearance)):
+            if fp is None:
+                continue
+            h = (fp._restore_height or fp.height()) if fp.minimized else fp.height()
+            s.setValue(f"layouts/{slot}/{key}_x", int(fp.x()))
+            s.setValue(f"layouts/{slot}/{key}_y", int(fp.y()))
+            s.setValue(f"layouts/{slot}/{key}_w", int(fp.width()))
+            s.setValue(f"layouts/{slot}/{key}_h", int(h))
+            s.setValue(f"layouts/{slot}/{key}_visible", "true" if fp.isVisible() else "false")
+            s.setValue(f"layouts/{slot}/{key}_minimized", "true" if fp.minimized else "false")
+        s.sync()
+
+        self._current_layout = f"{CUSTOM_LAYOUT_PREFIX}{slot}"
+        if self._overlay_controls is not None:
+            self._overlay_controls.set_layout_label(self._current_layout)
+            self._overlay_controls.flash_saved()
+
+    @staticmethod
+    def _copy_layout_slot(s: QSettings, src: str, dst: str) -> None:
+        for key in ("video", "source", "watch", "playback", "controls", "appearance"):
+            for prop in ("_x", "_y", "_w", "_h", "_visible", "_minimized"):
+                v = s.value(f"layouts/{src}/{key}{prop}")
+                if v is not None:
+                    s.setValue(f"layouts/{dst}/{key}{prop}", v)
 
     def _recenter_video(self) -> None:
         if not self._float_video:
@@ -590,6 +966,19 @@ class MainWindow(QMainWindow):
             if self.room: self.room.close()
         except Exception:
             pass
+        try:
+            self._discord.disconnect()
+        except Exception:
+            pass
+        try:
+            self._presence.disconnect()
+        except Exception:
+            pass
+        try:
+            if self._inbox_channel is not None:
+                supabase().remove_channel(self._inbox_channel)
+        except Exception:
+            pass
         super().closeEvent(e)
 
 
@@ -622,39 +1011,61 @@ def _make_splash() -> Optional[QLabel]:
 def main() -> int:
     app = QApplication(sys.argv)
     app.setOrganizationName(ORG_NAME); app.setApplicationName(APP_NAME)
+    # Set the app icon for the taskbar (and Minimize All Tabs taskbar entry).
+    icon_path = ASSETS_DIR / "icons" / "app.ico"
+    png_path = ASSETS_DIR / "icons" / "app.png"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
+    elif png_path.exists():
+        app.setWindowIcon(QIcon(str(png_path)))
     apply_theme(DEFAULT_COLORS)
+
+    # Show a quick splash NOW (before any slow work) so the user sees activity
+    # the instant they double-click the exe. Closes as soon as the main window
+    # is ready — no artificial wait.
+    from .widgets.splash import Splash
+    splash = Splash()
+    splash.show_and_pump()
 
     # Kick off yt-dlp install/update in background (non-blocking)
     QTimer.singleShot(0, ytdlp_manager.maybe_update_async)
 
-    # Splash (first 3s of the intro video, as an animated GIF) on launch.
-    splash = _make_splash()
-    if splash is not None:
-        splash.show()
-        loop = QEventLoop()
-        QTimer.singleShot(3000, loop.quit)
-        loop.exec()
-        splash.close()
-
     # Auth
     if not try_restore_session():
+        splash.close()
         dlg = AuthDialog()
         if dlg.exec() != AuthDialog.Accepted:
             return 0
+        splash = Splash(); splash.show_and_pump()
 
     # Pull user's saved color scheme
+    saved_scheme: dict = {}
     uid = current_user_id()
     if uid:
         try:
             r = supabase().table("profiles").select("color_scheme").eq("id", uid).single().execute()
-            apply_theme((r.data or {}).get("color_scheme") or DEFAULT_COLORS)
+            saved_scheme = (r.data or {}).get("color_scheme") or {}
+            apply_theme(saved_scheme or DEFAULT_COLORS)
         except Exception:
             apply_theme(DEFAULT_COLORS)
 
     # Overlay-only build: boot straight into the floating overlay (over your
     # game). The windowed/docked profile+player mode no longer launches.
     w = MainWindow()
+    # Apply video border from the saved theme on startup, before showing.
+    if saved_scheme:
+        try:
+            w.video_panel.apply_border(
+                bool(saved_scheme.get("video_border", False)),
+                str(saved_scheme.get("video_border_color") or "#e50914"),
+                int(saved_scheme.get("video_border_width") or 4),
+                bool(saved_scheme.get("video_rounded", False)),
+                int(saved_scheme.get("video_corner_radius") or 0),
+            )
+        except Exception:
+            pass
     w.show()
+    splash.close()
     QTimer.singleShot(0, lambda: w.set_overlay_mode(True))
     return app.exec()
 

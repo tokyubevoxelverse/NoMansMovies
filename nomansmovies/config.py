@@ -5,10 +5,13 @@ import sys
 from pathlib import Path
 
 # ====== Supabase ======
-# REPLACE with your Supabase project URL (e.g. https://abcd1234.supabase.co).
-# Find it under Project Settings -> API in the Supabase dashboard.
-SUPABASE_URL = "https://uhhyurupeapjpjseoffl.supabase.co"
-SUPABASE_PUBLISHABLE_KEY = "sb_publishable_ghWEVDYjfexgOokhwXebLA_BH6iHkUW"
+# Fill these in with your own Supabase project credentials before running.
+#   SUPABASE_URL                e.g. "https://<your-project-ref>.supabase.co"
+#   SUPABASE_PUBLISHABLE_KEY    the "publishable" / anon key from Project Settings → API
+# Publishable keys are designed to ship in clients; safety comes from Row-Level
+# Security policies on the tables (see sql/schema.sql).
+SUPABASE_URL = "https://YOUR-PROJECT-REF.supabase.co"
+SUPABASE_PUBLISHABLE_KEY = "YOUR_SUPABASE_PUBLISHABLE_KEY"
 
 # ====== Paths ======
 def _app_root() -> Path:
@@ -63,6 +66,39 @@ DEFAULT_COLORS = {
     "muted":  "#8a8a95",
 }
 
+# ---- Font defaults (applied app-wide via theme.py) ----
+DEFAULT_FONT_FAMILY = "Segoe UI"
+DEFAULT_FONT_SIZE = 10
+FONT_SIZE_RANGE = (8, 18)
+DEFAULT_FONT_WEIGHT = "normal"   # "normal" | "bold"
+DEFAULT_LETTER_SPACING_PX = 0     # int px (negative tightens)
+LETTER_SPACING_RANGE = (-2, 8)
+
+# ---- Video player border defaults ----
+DEFAULT_VIDEO_BORDER = False
+DEFAULT_VIDEO_BORDER_COLOR = "#e50914"
+DEFAULT_VIDEO_BORDER_WIDTH = 4
+DEFAULT_VIDEO_BORDER_WIDTH_RANGE = (1, 20)
+DEFAULT_VIDEO_ROUNDED = False
+DEFAULT_VIDEO_CORNER_RADIUS = 12
+DEFAULT_VIDEO_CORNER_RADIUS_RANGE = (0, 40)
+
+# ---- Layout presets (used by overlay Cycle Layouts + Movie-only cinema mode) ----
+LAYOUT_DEFAULT       = "default"
+LAYOUT_MOVIE_SOURCES = "movie_sources"
+LAYOUT_MOVIE_ONLY    = "movie_only"
+LAYOUTS = [LAYOUT_DEFAULT, LAYOUT_MOVIE_SOURCES, LAYOUT_MOVIE_ONLY]   # built-ins
+LAYOUT_LABELS = {
+    LAYOUT_DEFAULT:       "Default",
+    LAYOUT_MOVIE_SOURCES: "Movie + Sources",
+    LAYOUT_MOVIE_ONLY:    "Movie only",
+}
+# Custom user-saved layouts are stored separately and referenced as
+# "custom:1", "custom:2", … — they don't appear in LAYOUTS but DO appear in
+# the cycler (see main.py: _all_layouts / _cycle_layout).
+CUSTOM_LAYOUT_PREFIX = "custom:"
+MAX_CUSTOM_LAYOUTS = 9
+
 PRESET_THEMES = {
     "Theater":  {"bg": "#0f0f14", "fg": "#f0f0f5", "accent": "#e50914", "border": "#2a2a35", "panel": "#16161d", "muted": "#8a8a95"},
     "Neon":     {"bg": "#10001a", "fg": "#f8f0ff", "accent": "#00ffd5", "border": "#3a1a50", "panel": "#1a0428", "muted": "#9a82b0"},
@@ -110,9 +146,11 @@ MAX_INVITES = 3
 #   relationships.read — RESTRICTED. Discord rejects this scope for most apps
 #                        with "requested scope is unknown, invalid, or malformed".
 #                        Only enable if your app has the scope whitelisted.
-DISCORD_CLIENT_ID = "1509779937404653649"
+DISCORD_CLIENT_ID = "YOUR_DISCORD_CLIENT_ID"
 DISCORD_REDIRECT_PORT = 53682
 DISCORD_REDIRECT_URI = f"http://localhost:{DISCORD_REDIRECT_PORT}/discord-callback"
 DISCORD_SCOPES = "identify"
-# Set this to True ONLY if your Discord app has been granted relationships.read.
+# Discord rejects relationships.read for this app, so we cannot auto-pull the
+# user's Discord friends list. The "Discord" tab in the Friends panel still
+# lets users find each other manually after both link Discord.
 DISCORD_TRY_RELATIONSHIPS = False

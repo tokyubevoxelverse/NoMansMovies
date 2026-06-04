@@ -6,7 +6,7 @@ from PySide6.QtCore import Qt, Signal, QSize, QThread, QObject, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QListWidget, QListWidgetItem, QFileDialog, QFrame
+    QListWidget, QListWidgetItem, QFileDialog, QFrame, QSizePolicy
 )
 import requests
 
@@ -65,35 +65,53 @@ class SourcePanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        lay = QVBoxLayout(self); lay.setContentsMargins(10, 10, 10, 10); lay.setSpacing(8)
+        lay = QVBoxLayout(self); lay.setContentsMargins(6, 6, 6, 6); lay.setSpacing(6)
+
+        def shrink(b: QPushButton, min_w: int = 0) -> QPushButton:
+            # Buttons that may live in narrow panels — let them shrink to a tiny
+            # minimum without distorting their text.
+            b.setMinimumWidth(min_w)
+            b.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            b.setStyleSheet("QPushButton { padding: 4px 8px; }")
+            return b
 
         title = QLabel("Sources"); title.setStyleSheet("font-size: 14pt; font-weight: 700;")
         lay.addWidget(title)
 
         lay.addWidget(QLabel("Paste a direct movie link"))
-        link_row = QHBoxLayout()
+        link_row = QHBoxLayout(); link_row.setSpacing(4)
         self.link = QLineEdit(); self.link.setPlaceholderText("https://…/movie.mp4")
+        self.link.setMinimumWidth(0)
+        self.link.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.link.returnPressed.connect(self._play_link)
-        play_link = QPushButton("Play"); play_link.setProperty("accent", True); play_link.clicked.connect(self._play_link)
+        play_link = shrink(QPushButton("Play"))
+        play_link.setProperty("accent", True); play_link.clicked.connect(self._play_link)
         link_row.addWidget(self.link, 1); link_row.addWidget(play_link)
         lay.addLayout(link_row)
 
-        lay.addSpacing(4)
+        lay.addSpacing(2)
         lay.addWidget(QLabel("Search YouTube"))
-        s_row = QHBoxLayout()
+        s_row = QHBoxLayout(); s_row.setSpacing(4)
         self.search = QLineEdit(); self.search.setPlaceholderText("type and press Enter")
+        self.search.setMinimumWidth(0)
+        self.search.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.search.returnPressed.connect(self._search)
-        s_btn = QPushButton("Search"); s_btn.clicked.connect(self._search)
+        s_btn = shrink(QPushButton("Search")); s_btn.clicked.connect(self._search)
         s_row.addWidget(self.search, 1); s_row.addWidget(s_btn)
         lay.addLayout(s_row)
 
         self.results = QListWidget()
         self.results.setSelectionMode(QListWidget.SingleSelection)
+        # Both single-click and double-click play. Some users expect either.
+        self.results.itemClicked.connect(self._play_result)
         self.results.itemDoubleClicked.connect(self._play_result)
+        self.results.setMinimumWidth(0)
+        self.results.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         lay.addWidget(self.results, 1)
 
         lay.addWidget(QLabel("Or stream a local file"))
-        local_btn = QPushButton("Open local video…"); local_btn.clicked.connect(self._open_local)
+        local_btn = shrink(QPushButton("Open local video…"))
+        local_btn.clicked.connect(self._open_local)
         lay.addWidget(local_btn)
 
         self._results_data: List[dict] = []

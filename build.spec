@@ -18,6 +18,7 @@ a = Analysis(
         'postgrest',
         'storage3',
         'httpx',
+        'pypresence',
     ],
     hookspath=[],
     runtime_hooks=[],

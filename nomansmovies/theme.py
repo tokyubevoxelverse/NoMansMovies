@@ -8,7 +8,10 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
-from .config import DEFAULT_COLORS
+from .config import (
+    DEFAULT_COLORS, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE,
+    DEFAULT_FONT_WEIGHT, DEFAULT_LETTER_SPACING_PX,
+)
 
 
 class _ThemeSignal(QObject):
@@ -16,7 +19,13 @@ class _ThemeSignal(QObject):
 
 
 theme_signal = _ThemeSignal()
-_current: dict = dict(DEFAULT_COLORS)
+_current: dict = {
+    **DEFAULT_COLORS,
+    "font_family":    DEFAULT_FONT_FAMILY,
+    "font_size":      DEFAULT_FONT_SIZE,
+    "font_weight":    DEFAULT_FONT_WEIGHT,
+    "letter_spacing": DEFAULT_LETTER_SPACING_PX,
+}
 
 
 def current() -> dict:
@@ -25,6 +34,12 @@ def current() -> dict:
 
 def color(key: str) -> str:
     return _current.get(key, DEFAULT_COLORS[key])
+
+
+def font_family() -> str: return str(_current.get("font_family") or DEFAULT_FONT_FAMILY)
+def font_size() -> int:
+    try: return int(_current.get("font_size") or DEFAULT_FONT_SIZE)
+    except (TypeError, ValueError): return DEFAULT_FONT_SIZE
 
 
 def _lighten(hex_: str, amount: float) -> str:
@@ -39,7 +54,12 @@ def _alpha(hex_: str, a: float) -> str:
 
 def apply_theme(colors: dict | None = None) -> None:
     global _current
-    _current = {**DEFAULT_COLORS, **(colors or {})}
+    base = {**DEFAULT_COLORS,
+            "font_family":    DEFAULT_FONT_FAMILY,
+            "font_size":      DEFAULT_FONT_SIZE,
+            "font_weight":    DEFAULT_FONT_WEIGHT,
+            "letter_spacing": DEFAULT_LETTER_SPACING_PX}
+    _current = {**base, **(colors or {})}
     c = _current
 
     bg = QColor(c["bg"]); fg = QColor(c["fg"]); accent = QColor(c["accent"])
@@ -78,8 +98,10 @@ def _qss(c: dict) -> str:
     QMainWindow, QDialog, QWidget {{
         background-color: {c['bg']};
         color: {c['fg']};
-        font-family: 'Segoe UI', sans-serif;
-        font-size: 10pt;
+        font-family: '{c.get('font_family', DEFAULT_FONT_FAMILY)}', sans-serif;
+        font-size: {int(c.get('font_size', DEFAULT_FONT_SIZE))}pt;
+        font-weight: {c.get('font_weight', DEFAULT_FONT_WEIGHT)};
+        letter-spacing: {int(c.get('letter_spacing', DEFAULT_LETTER_SPACING_PX))}px;
     }}
     QLabel {{ color: {c['fg']}; background: transparent; }}
     QLabel[muted="true"] {{ color: {c['muted']}; }}

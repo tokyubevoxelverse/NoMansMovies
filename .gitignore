@@ -30,3 +30,23 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+*.iml
+
+# Local secrets / overrides
+.env
+.env.*
+secrets.json
+local.config.json
+
+# Build / PyInstaller noise
+warn-*.txt
+xref-*.html
+*.log
+build.log
+
+# Source media used to make assets/splash.gif (not needed in repo)
+SplashScreenVideo.mp4
+newlogo.png
+
+# Misc local folders not part of the project
+androidvronly/

@@ -68,6 +68,18 @@ class _SignupPage(QWidget):
         lay.addWidget(title)
         lay.addWidget(QLabel("Pick a username and password"))
 
+        notice = QLabel(
+            "⚠  Heads up: the verification email is NOT real — ignore it.\n"
+            "You can log in immediately after signing up."
+        )
+        notice.setWordWrap(True)
+        notice.setStyleSheet(
+            "background: rgba(255, 200, 0, 0.10); color: #f0e6c0; "
+            "border: 1px solid rgba(255, 200, 0, 0.40); border-radius: 6px; "
+            "padding: 8px 10px; font-weight: 600;"
+        )
+        lay.addWidget(notice)
+
         self.username = QLineEdit(); self.username.setPlaceholderText("username")
         self.email = QLineEdit(); self.email.setPlaceholderText("email")
         self.password = QLineEdit(); self.password.setPlaceholderText("password (min 6)"); self.password.setEchoMode(QLineEdit.Password)

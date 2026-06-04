@@ -32,17 +32,29 @@ class FriendsPanel(QWidget):
         self.results_list = QListWidget()
         self.results_list.itemDoubleClicked.connect(self._open_search_profile)
         self.requests_list = QListWidget()
+        self.online_list = QListWidget()
+        self.online_list.itemDoubleClicked.connect(self._open_friend_profile)
         self.friends_list = QListWidget()
         self.friends_list.itemDoubleClicked.connect(self._open_friend_profile)
         self.discord_list = QListWidget()
-        self.tabs.addTab(self.friends_list, "Friends")
+        self.tabs.addTab(self.friends_list, "All")
+        self.tabs.addTab(self.online_list, "Online")
         self.tabs.addTab(self.requests_list, "Requests")
         self.tabs.addTab(self.discord_list, "Discord")
         self.tabs.addTab(self.results_list, "Search")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         lay.addWidget(self.tabs, 1)
 
+        self._online_ids: set[str] = set()
         self.refresh()
+
+    def set_online_ids(self, ids) -> None:
+        """Tell the panel which user IDs are currently online (via Supabase presence)."""
+        self._online_ids = set(ids or [])
+        # Refresh the All + Online tabs to reflect the new state.
+        self._load_friends()
+        if self.tabs.currentWidget() is self.online_list:
+            self._load_online()
 
     # ============ data ============
     def refresh(self) -> None:
@@ -50,10 +62,36 @@ class FriendsPanel(QWidget):
         self._load_requests()
         if self.tabs.currentWidget() is self.discord_list:
             self._load_discord_users()
+        if self.tabs.currentWidget() is self.online_list:
+            self._load_online()
 
     def _on_tab_changed(self, idx: int) -> None:
-        if self.tabs.widget(idx) is self.discord_list:
+        w = self.tabs.widget(idx)
+        if w is self.discord_list:
             self._load_discord_users()
+        elif w is self.online_list:
+            self._load_online()
+
+    def _load_online(self) -> None:
+        uid = current_user_id()
+        if not uid:
+            return
+        try:
+            r = supabase().table("friendships").select("*").eq("status", "accepted").execute()
+            rows = r.data or []
+        except Exception:
+            rows = []
+        ids = [self._other(row, uid) for row in rows if self._other(row, uid)]
+        ids = [i for i in ids if i in self._online_ids]
+        profiles = self._fetch_profiles(ids)
+        self.online_list.clear()
+        if not profiles:
+            self.online_list.addItem("No friends online right now."); return
+        for p in profiles:
+            it = QListWidgetItem(); it.setSizeHint(QSize(0, 36))
+            it.setData(Qt.UserRole, p["id"])
+            self.online_list.addItem(it)
+            self.online_list.setItemWidget(it, self._friend_row_widget(p, online=True))
 
     def _load_friends(self) -> None:
         uid = current_user_id()
@@ -72,7 +110,7 @@ class FriendsPanel(QWidget):
             it.setData(Qt.UserRole, p["id"])
             it.setSizeHint(QSize(0, 36))
             self.friends_list.addItem(it)
-            row = self._friend_row_widget(p)
+            row = self._friend_row_widget(p, online=(p["id"] in self._online_ids))
             self.friends_list.setItemWidget(it, row)
 
     def _load_requests(self) -> None:
@@ -213,8 +251,15 @@ class FriendsPanel(QWidget):
             QMessageBox.warning(self, "Could not remove", str(ex)); return
         self.refresh()
 
-    def _friend_row_widget(self, p: dict) -> QWidget:
+    def _friend_row_widget(self, p: dict, online: bool = False) -> QWidget:
         w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(6, 4, 6, 4); h.setSpacing(6)
+        dot = QLabel("●")
+        dot.setStyleSheet(
+            f"color: {'#22c55e' if online else '#5a5a65'}; "
+            "background: transparent; font-size: 14pt;"
+        )
+        dot.setToolTip("Online" if online else "Offline")
+        h.addWidget(dot)
         h.addWidget(QLabel(f"@{p['username']}"), 1)
         view = QPushButton("View"); view.clicked.connect(lambda: self.view_profile.emit(p["id"]))
         msg = QPushButton("Message"); msg.clicked.connect(lambda: self.message.emit(p["id"]))
