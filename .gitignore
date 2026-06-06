@@ -37,6 +37,7 @@ desktop.ini
 .env.*
 secrets.json
 local.config.json
+nomansmovies/config_local.py
 
 # Build / PyInstaller noise
 warn-*.txt

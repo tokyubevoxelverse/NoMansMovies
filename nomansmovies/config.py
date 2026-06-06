@@ -154,3 +154,18 @@ DISCORD_SCOPES = "identify"
 # user's Discord friends list. The "Discord" tab in the Friends panel still
 # lets users find each other manually after both link Discord.
 DISCORD_TRY_RELATIONSHIPS = False
+
+
+# ============ LOCAL OVERRIDES ============
+# Drop a `config_local.py` next to this file with your real Supabase / Discord
+# credentials. It's gitignored, so the public config.py stays sanitized while
+# your local build picks up the real values.
+#
+# Example config_local.py:
+#     SUPABASE_URL = "https://<your-ref>.supabase.co"
+#     SUPABASE_PUBLISHABLE_KEY = "sb_publishable_..."
+#     DISCORD_CLIENT_ID = "1234567890"
+try:
+    from .config_local import *  # noqa: F401, F403
+except ImportError:
+    pass
