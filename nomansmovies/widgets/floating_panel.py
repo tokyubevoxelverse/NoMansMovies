@@ -45,6 +45,8 @@ class _TitleBar(QWidget):
         self._title.setStyleSheet("font-weight: 600; background: transparent;")
         lay.addWidget(self._title, 1)
 
+        self._extra_btns_layout = lay   # remember so we can insert before the
+                                        # min/close buttons later
         self._min_btn = QPushButton("—"); self._min_btn.setObjectName("floatBtn")
         self._min_btn.setFixedSize(26, 22); self._min_btn.setToolTip("Minimize")
         self._min_btn.clicked.connect(self.minimize_requested)
@@ -52,6 +54,17 @@ class _TitleBar(QWidget):
         self._close_btn.setFixedSize(26, 22); self._close_btn.setToolTip("Exit overlay mode")
         self._close_btn.clicked.connect(self.close_requested)
         lay.addWidget(self._min_btn); lay.addWidget(self._close_btn)
+
+    def add_button(self, text: str, tooltip: str, callback) -> QPushButton:
+        """Insert a small button before the minimize / close buttons."""
+        btn = QPushButton(text); btn.setObjectName("floatBtn")
+        btn.setFixedSize(26, 22); btn.setToolTip(tooltip)
+        btn.clicked.connect(callback)
+        # Position: after the title label + stretch, before — and ✕
+        # (— is currently the 3rd-from-end, ✕ the last). Insert at count-2.
+        idx = self._extra_btns_layout.count() - 2
+        self._extra_btns_layout.insertWidget(idx, btn)
+        return btn
 
     def set_minimized_icon(self, minimized: bool) -> None:
         self._min_btn.setText("▢" if minimized else "—")
@@ -115,6 +128,10 @@ class FloatingPanel(QWidget):
 
         self._minimized = False
         self._restore_height: int | None = None
+        # Captured the first time we minimize so we can restore the panel's
+        # NATURAL minimum height (which main may have set to something other
+        # than the FloatingPanel default of 160 — e.g. controls is 130).
+        self._saved_min_height: int | None = None
 
         self._apply_theme(current_theme())
         theme_signal.changed.connect(self._apply_theme)
@@ -133,7 +150,12 @@ class FloatingPanel(QWidget):
         """QStackedWidget.removeWidget() and QDockWidget.setWidget() leave the
         OLD widget and many of its children in the explicitly-hidden state.
         Walk the content tree and un-hide everything so the user actually sees
-        the form fields inside Source / Watch panels."""
+        the form fields inside Source / Watch panels.
+
+        If the panel is currently minimized, do NOT un-hide content — the
+        title-bar-only look must persist."""
+        if self._minimized:
+            return
         self._content_holder.setVisible(True)
         self._content.setVisible(True)
         from PySide6.QtWidgets import QWidget as _QW
@@ -148,9 +170,30 @@ class FloatingPanel(QWidget):
         return self._minimized
 
     def apply_minimized(self, minimized: bool) -> None:
-        """Force into the given minimized state (used when restoring from QSettings)."""
+        """Force the panel into the given minimized state. Idempotent — calling
+        twice with the same value is safe and re-asserts the visual state in
+        case _force_show_children or external code un-hid the content."""
+        # On the very first call, remember the panel's natural minimum height
+        # so a later restoration uses it (rather than a hardcoded 160).
+        if self._saved_min_height is None and not self._minimized:
+            self._saved_min_height = self.minimumHeight()
+
         if minimized != self._minimized:
             self._toggle_minimize()
+        # Re-assert visual state — handles the case where _force_show_children
+        # un-hid content while we were "minimized" (or content got hidden while
+        # we should be un-minimized).
+        if minimized:
+            self._content_holder.hide()
+            new_h = self.title_bar.height() + 2
+            self.resize(self.width(), new_h)
+            self.title_bar.set_minimized_icon(True)
+        else:
+            self._content_holder.show()
+            # NOTE: do NOT call setMinimumHeight here — the toggle path already
+            # restored the saved minimum, and overriding with a constant would
+            # break per-panel minimums set from main (e.g., controls is 130).
+            self.title_bar.set_minimized_icon(False)
 
     # ---- API ----
     def set_title(self, t: str) -> None:
@@ -159,6 +202,10 @@ class FloatingPanel(QWidget):
     def hide_close_button(self) -> None:
         """Remove the ✕ button from the title bar (only minimize will remain)."""
         self.title_bar.hide_close_button()
+
+    def add_title_button(self, text: str, tooltip: str, callback):
+        """Insert a custom button into the title strip, before the — / ✕ icons."""
+        return self.title_bar.add_button(text, tooltip, callback)
 
     def take_content(self) -> QWidget:
         """Detach the content widget and return it (caller becomes responsible for it)."""
@@ -171,12 +218,17 @@ class FloatingPanel(QWidget):
     def _toggle_minimize(self) -> None:
         if self._minimized:
             self._content_holder.show()
-            self.setMinimumHeight(160)
+            # Restore the natural minimum height we captured before minimizing
+            # (NOT a hardcoded 160 — that would override main's setMinimumSize
+            # for panels like the NoMansMovies controls bar, which is 130).
+            self.setMinimumHeight(self._saved_min_height if self._saved_min_height is not None else 160)
             if self._restore_height:
                 self.resize(self.width(), self._restore_height)
             self._minimized = False
         else:
             self._restore_height = self.height()
+            # Capture BEFORE we change it.
+            self._saved_min_height = self.minimumHeight()
             self._content_holder.hide()
             new_h = self.title_bar.height() + 2
             self.setMinimumHeight(new_h)

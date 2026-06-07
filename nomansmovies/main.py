@@ -12,8 +12,10 @@ from PySide6.QtWidgets import (
 
 from . import ytdlp_manager
 from .config import (
-    APP_NAME, ORG_NAME, DEFAULT_COLORS, ASSETS_DIR,
-    LAYOUTS, LAYOUT_LABELS, LAYOUT_DEFAULT, LAYOUT_MOVIE_SOURCES, LAYOUT_MOVIE_ONLY,
+    APP_NAME, ORG_NAME, DEFAULT_COLORS, ASSETS_DIR, VERSION, CHANGELOG_BULLETS,
+    LAYOUTS, LAYOUTS_AFTER_CUSTOMS, ALL_BUILTIN_LAYOUTS, LAYOUT_LABELS,
+    LAYOUT_DEFAULT, LAYOUT_MOVIE_SOURCES, LAYOUT_MOVIE_ONLY,
+    LAYOUT_MOVIE_PLAYBACK, LAYOUT_MOVIE_PLAYER_ONLY,
     CUSTOM_LAYOUT_PREFIX, MAX_CUSTOM_LAYOUTS,
 )
 from .theme import apply_theme
@@ -148,8 +150,27 @@ class MainWindow(QMainWindow):
 
         # Layout state — current layout key + saved per-layout snapshot of which
         # panels were visible before triple-9 / Cycle Layouts changed things.
-        self._current_layout: str = LAYOUT_DEFAULT
+        # Restored from QSettings so cycling persists across launches.
+        _s = QSettings(ORG_NAME, APP_NAME)
+        _saved_cur = _s.value("layouts/current") or LAYOUT_DEFAULT
+        _saved_cur = str(_saved_cur)
+        # Custom slot key only valid if a corresponding slot exists.
+        if _saved_cur.startswith(CUSTOM_LAYOUT_PREFIX):
+            try:
+                _slot = int(_saved_cur[len(CUSTOM_LAYOUT_PREFIX):])
+                _count = int(_s.value("layouts/custom_count", 0) or 0)
+                if _slot < 1 or _slot > min(_count, MAX_CUSTOM_LAYOUTS):
+                    _saved_cur = LAYOUT_DEFAULT
+            except (ValueError, TypeError):
+                _saved_cur = LAYOUT_DEFAULT
+        elif _saved_cur not in ALL_BUILTIN_LAYOUTS:
+            _saved_cur = LAYOUT_DEFAULT
+        self._current_layout: str = _saved_cur
         self._previous_layout: str = LAYOUT_DEFAULT
+        # One-time migration: builds before 0.2.5 allowed up to 9 custom slots.
+        # Clamp to MAX_CUSTOM_LAYOUTS and delete the stale higher-numbered keys
+        # so they don't keep showing up in the cycler.
+        self._migrate_custom_layout_slots()
 
         # Triple-9 hotkey for cinema mode (Movie only).
         self._key9_presses: List[float] = []
@@ -399,6 +420,14 @@ class MainWindow(QMainWindow):
             self.stack.removeWidget(self.video_panel)
             self._float_video = FloatingPanel("Movie player", self.video_panel)
             self._float_video.closed.connect(lambda: _hide_panel(self._float_video))
+            # Extra title-bar buttons (sit next to —): bring back the
+            # NoMansMovies controls panel, and minimize every floating panel.
+            self._float_video.add_title_button(
+                "≡", "Bring back the NoMansMovies controls panel",
+                self._show_controls_panel)
+            self._float_video.add_title_button(
+                "⊟", "Minimize all panels (NoMansMovies goes to the taskbar)",
+                self._minimize_all_overlay)
             cw, ch_ = 1024, 600
             self._restore_panel(self._float_video, "video", (
                 screen_geom.x() + (screen_geom.width() - cw) // 2,
@@ -433,6 +462,10 @@ class MainWindow(QMainWindow):
                 pb = self.playback_bar
                 self.playback_dock.setWidget(QWidget())
                 self._float_playback = FloatingPanel("Playback controls", pb)
+                # Without this, FloatingPanel's default 160 px height min
+                # would override the layout calc and push playback down
+                # into the controls bar.
+                self._float_playback.setMinimumSize(400, 130)
                 self._float_playback.closed.connect(lambda: _hide_panel(self._float_playback))
                 self._restore_panel(self._float_playback, "playback", (
                     screen_geom.x() + (screen_geom.width() - 820) // 2,
@@ -452,7 +485,7 @@ class MainWindow(QMainWindow):
             controls.show_controls_help.connect(self._open_controls_help)
             controls.set_layout_label(self._current_layout)
             self._overlay_controls = controls
-            self._float_controls = FloatingPanel("NoMansMovies", controls)
+            self._float_controls = FloatingPanel(f"NoMansMovies  v{VERSION}", controls)
             self._float_controls.setMinimumSize(560, 130)
             # ✕ on the controls panel = quit app (overlay-only build, no windowed mode).
             self._float_controls.closed.connect(QApplication.instance().quit)
@@ -463,6 +496,11 @@ class MainWindow(QMainWindow):
 
             self.bottom.set_overlay(True)
             self.hide()
+
+            # CRITICAL: now that the panels exist, force-apply the active layout
+            # so built-in presets use their predefined geometries instead of
+            # whatever was auto-saved from the previous session.
+            QTimer.singleShot(0, lambda: self._apply_layout(self._current_layout))
 
         elif not on and self._overlay_active:
             # Save overlay layout before tearing down so it persists for next time.
@@ -573,6 +611,110 @@ class MainWindow(QMainWindow):
         return super().eventFilter(obj, e)
 
     # ============ layouts ============
+    def _layout_default_geom(self, layout: str, key: str):
+        """Built-in layouts are PRESETS — every cycle to one places each
+        visible panel at a predefined position and size. Custom slots are the
+        ONLY thing that remembers exact state.
+
+        Geometries are proportional to the current screen size so the same
+        preset works at 1280×720, 1920×1080, 2560×1440, 3440×1440 ultra-wide,
+        and 4K. Hard min/max clamps keep panels usable even on weird sizes.
+        Returns (x, y, w, h) or None if the panel isn't part of that layout."""
+        screen = QApplication.primaryScreen().availableGeometry()
+        sx, sy = screen.x(), screen.y()
+        sw, sh = screen.width(), screen.height()
+
+        # --- adaptive sizes ---
+        # Side panels (Sources, Watch): ~20 % of screen width, clamped.
+        side_w = max(200, min(380, int(sw * 0.20)))
+        # Bottom strips (playback bar, controls bar) heights. Must be >= 130
+        # to match the minimum height enforced by the FloatingPanel for these
+        # panels (controls = 130, playback = 130). Otherwise show_with_geometry
+        # would clamp h up to the panel min and break our layout math.
+        strip_h = max(130, min(150, int(sh * 0.11)))
+        # Controls bar width: ~50 % of screen, clamped so it stays readable on
+        # ultra-wide and doesn't crowd a small screen.
+        ctrl_w  = max(560, min(900, int(sw * 0.50)))
+        # Margins.
+        m       = max(8, int(sw * 0.012))
+        top_y   = sy + max(20, int(sh * 0.035))
+        # Clear vertical gap reserved BETWEEN the Playback strip and the
+        # NoMansMovies controls strip. Without this they'll overlap on some
+        # screen sizes / DPI.
+        ctrl_gap = max(m, int(sh * 0.04))
+
+        # --- controls bar (used by every built-in that shows it) ---
+        ctrl_x  = sx + (sw - ctrl_w) // 2
+        ctrl_y  = sy + sh - strip_h - m
+        controls_geom = (ctrl_x, ctrl_y, ctrl_w, strip_h)
+
+        # available vertical room for "video + playback" above the controls bar
+        avail_v = ctrl_y - top_y - ctrl_gap
+
+        if layout == LAYOUT_DEFAULT:
+            video_x = sx + side_w + 2 * m
+            video_w = max(420, sw - 2 * (side_w + 2 * m))
+            video_h = max(280, avail_v - strip_h - m)
+            playback_x = video_x
+            playback_w = video_w
+            playback_y = top_y + video_h + m
+            side_h = ctrl_y - top_y - m
+            tab = {
+                "video":    (video_x, top_y, video_w, video_h),
+                "source":   (sx + m, top_y, side_w, side_h),
+                "watch":    (sx + sw - side_w - m, top_y, side_w, side_h),
+                "playback": (playback_x, playback_y, playback_w, strip_h),
+                "controls": controls_geom,
+            }
+        elif layout == LAYOUT_MOVIE_SOURCES:
+            video_x = sx + side_w + 2 * m
+            video_w = max(420, sw - side_w - 3 * m)
+            video_h = max(280, avail_v - strip_h - m)
+            playback_y = top_y + video_h + m
+            side_h = ctrl_y - top_y - m
+            tab = {
+                "video":    (video_x, top_y, video_w, video_h),
+                "source":   (sx + m, top_y, side_w, side_h),
+                "playback": (video_x, playback_y, video_w, strip_h),
+                "controls": controls_geom,
+            }
+        elif layout == LAYOUT_MOVIE_ONLY:
+            # Big centered video (16:9 cap), plus controls bar.
+            avail_w = sw - 4 * m
+            avail_h = avail_v
+            vw = min(avail_w, int(avail_h * 16 / 9))
+            vh = min(avail_h, int(vw * 9 / 16))
+            vx = sx + (sw - vw) // 2
+            vy = top_y + (avail_v - vh) // 2
+            tab = {
+                "video":    (vx, vy, vw, vh),
+                "controls": controls_geom,
+            }
+        elif layout == LAYOUT_MOVIE_PLAYBACK:
+            avail_w = sw - 4 * m
+            avail_h = avail_v - strip_h - m
+            vw = min(avail_w, int(avail_h * 16 / 9))
+            vh = min(avail_h, int(vw * 9 / 16))
+            vx = sx + (sw - vw) // 2
+            vy = top_y
+            tab = {
+                "video":    (vx, vy, vw, vh),
+                "playback": (vx, vy + vh + m, vw, strip_h),
+                "controls": controls_geom,
+            }
+        elif layout == LAYOUT_MOVIE_PLAYER_ONLY:
+            # Video fills nearly the entire screen, 16:9 contained.
+            avail_w = sw - 2 * m
+            avail_h = sh - 2 * m
+            vw = min(avail_w, int(avail_h * 16 / 9))
+            vh = min(avail_h, int(vw * 9 / 16))
+            vx = sx + (sw - vw) // 2
+            vy = sy + (sh - vh) // 2
+            tab = {"video": (vx, vy, vw, vh)}
+        else:
+            return None
+        return tab.get(key)
+
     def _apply_layout(self, layout: str) -> None:
         # Custom slots: load saved per-panel geometry + visibility for that slot.
         if isinstance(layout, str) and layout.startswith(CUSTOM_LAYOUT_PREFIX):
@@ -601,22 +743,40 @@ class MainWindow(QMainWindow):
                 self._overlay_controls.set_layout_label(layout)
             return
 
-        if layout not in LAYOUTS:
+        if layout not in ALL_BUILTIN_LAYOUTS:
             return
         self._current_layout = layout
         wants = {
-            LAYOUT_DEFAULT:       {"video": True,  "source": True,  "watch": True,  "playback": True},
-            LAYOUT_MOVIE_SOURCES: {"video": True,  "source": True,  "watch": False, "playback": True},
-            LAYOUT_MOVIE_ONLY:    {"video": True,  "source": False, "watch": False, "playback": False},
+            LAYOUT_DEFAULT:           {"video": True, "source": True,  "watch": True,  "playback": True,  "controls": True},
+            LAYOUT_MOVIE_SOURCES:     {"video": True, "source": True,  "watch": False, "playback": True,  "controls": True},
+            LAYOUT_MOVIE_ONLY:        {"video": True, "source": False, "watch": False, "playback": False, "controls": True},
+            LAYOUT_MOVIE_PLAYBACK:    {"video": True, "source": False, "watch": False, "playback": True,  "controls": True},
+            # The "Movie player only" preset hides EVERY other panel including
+            # the NoMansMovies controls bar. Use the ≡ button on the Movie
+            # panel's title strip to bring the controls bar back.
+            LAYOUT_MOVIE_PLAYER_ONLY: {"video": True, "source": False, "watch": False, "playback": False, "controls": False},
         }[layout]
 
         if self._overlay_active:
+            # Built-in layouts are PRESETS: every visible panel is reset to a
+            # predefined position + size + un-minimized state. Custom slots
+            # are the only thing that remembers the user's exact arrangement.
             for key, fp in (("video", self._float_video), ("source", self._float_source),
-                            ("watch", self._float_watch), ("playback", self._float_playback)):
-                if fp is None: continue
-                fp.show() if wants[key] else fp.hide()
-            # Controls panel always visible so the user can navigate back out.
-            if self._float_controls: self._float_controls.show()
+                            ("watch", self._float_watch), ("playback", self._float_playback),
+                            ("controls", self._float_controls)):
+                if fp is None:
+                    continue
+                if not wants[key]:
+                    fp.hide()
+                    continue
+                geom = self._layout_default_geom(layout, key)
+                fp.apply_minimized(False)   # always un-minimize on built-ins
+                if geom:
+                    fp.show_with_geometry(*geom)
+                else:
+                    fp.show()
+            if self._float_video is not None:
+                self.video_panel.refresh_video_sink()
         else:
             self.video_panel.setVisible(wants["video"])
             self.source_dock.setVisible(wants["source"])
@@ -626,11 +786,38 @@ class MainWindow(QMainWindow):
         if self._overlay_controls is not None:
             self._overlay_controls.set_layout_label(layout)
 
-    def _all_layouts(self) -> list:
-        """Built-ins followed by any saved Custom slots."""
+    def _migrate_custom_layout_slots(self) -> None:
+        """Older builds permitted up to 9 custom layout slots. Now cap is 3.
+        Drop any persisted slot 4..N keys, and clamp the stored count."""
         s = QSettings(ORG_NAME, APP_NAME)
-        count = self._read_int(s, "layouts/custom_count", 0)
-        return list(LAYOUTS) + [f"{CUSTOM_LAYOUT_PREFIX}{i}" for i in range(1, count + 1)]
+        old_count = self._read_int(s, "layouts/custom_count", 0)
+        if old_count <= MAX_CUSTOM_LAYOUTS:
+            # Still write a clamped value back in case it was a bogus / negative one.
+            if old_count != max(0, min(old_count, MAX_CUSTOM_LAYOUTS)):
+                s.setValue("layouts/custom_count", max(0, min(old_count, MAX_CUSTOM_LAYOUTS)))
+                s.sync()
+            return
+        for i in range(MAX_CUSTOM_LAYOUTS + 1, old_count + 1):
+            for key in ("video", "source", "watch", "playback", "controls", "appearance"):
+                for prop in ("_x", "_y", "_w", "_h", "_visible", "_minimized"):
+                    s.remove(f"layouts/{i}/{key}{prop}")
+        s.setValue("layouts/custom_count", MAX_CUSTOM_LAYOUTS)
+        s.sync()
+
+    def _all_layouts(self) -> list:
+        """Cycler order: [built-ins-before-customs] + [your custom slots] +
+        [built-ins-after-customs]. The "after" bucket holds Movie-player-only,
+        which hides the controls panel — so it sits at the end of the cycle
+        and the wrap goes straight back to Default rather than skipping the
+        customs the user is trying to reach. Cap on custom_count even if a
+        previous build wrote a higher value."""
+        s = QSettings(ORG_NAME, APP_NAME)
+        count = min(self._read_int(s, "layouts/custom_count", 0), MAX_CUSTOM_LAYOUTS)
+        return (
+            list(LAYOUTS)
+            + [f"{CUSTOM_LAYOUT_PREFIX}{i}" for i in range(1, count + 1)]
+            + list(LAYOUTS_AFTER_CUSTOMS)
+        )
 
     def _cycle_layout(self) -> None:
         order = self._all_layouts()
@@ -734,6 +921,47 @@ class MainWindow(QMainWindow):
         # can block input on some setups.)
         pass
 
+    def _show_controls_panel(self) -> None:
+        """Re-show the NoMansMovies floating controls panel.
+
+        Triggered by the ≡ button on the Movie panel title strip.
+
+        Special case: in **Movie player only** mode, the controls panel is
+        intentionally hidden by the layout itself. Just showing the panel in
+        place wouldn't be enough — the cycler would still think we're on
+        Movie player only, and any layout cycle would re-hide the controls.
+        So we fully switch to LAYOUT_DEFAULT (which restores every panel at
+        sensible positions and updates the layout state).
+
+        For every other layout the controls panel is already visible; the
+        click un-minimizes it, recenters if off-screen, and raises it."""
+        fp = self._float_controls
+        if fp is None:
+            return
+        if self._current_layout == LAYOUT_MOVIE_PLAYER_ONLY:
+            # Apply the Default preset — brings every panel back at
+            # predefined positions and properly updates _current_layout.
+            self._apply_layout(LAYOUT_DEFAULT)
+            return
+        screen = QApplication.primaryScreen().availableGeometry()
+        fp.apply_minimized(False)
+        gx = fp.x(); gy = fp.y(); gw = fp.width(); gh = fp.height()
+        on_screen = (
+            screen.left() <= gx + 40 <= screen.right()
+            and screen.top() <= gy + 20 <= screen.bottom()
+            and gw > 50 and gh > 30
+        )
+        if not on_screen:
+            w, h = max(640, gw), max(130, gh)
+            fp.resize(w, h)
+            fp.move(
+                screen.x() + (screen.width() - w) // 2,
+                screen.bottom() - h - 60,
+            )
+        fp.show()
+        fp.raise_()
+        fp.activateWindow()
+
     def _open_controls_help(self) -> None:
         """Open the Controls cheatsheet in its own floating panel."""
         if getattr(self, "_float_help", None) is not None and self._float_help.isVisible():
@@ -794,17 +1022,15 @@ class MainWindow(QMainWindow):
 
     # ============ Discord Rich Presence ============
     def _maybe_start_discord_presence(self) -> None:
-        """Only connect if the user has linked their Discord (silent no-op if not)."""
-        uid = current_user_id()
-        if not uid:
-            return
-        try:
-            r = supabase().table("profiles").select("discord_id").eq("id", uid).single().execute()
-            linked = bool((r.data or {}).get("discord_id"))
-        except Exception:
-            linked = False
-        if linked:
-            self._discord.connect()
+        """Connect to the local Discord IPC pipe at startup.
+
+        Discord Rich Presence is a per-client feature — it does NOT require the
+        user to have linked their Discord in our Supabase profile. We always try
+        to connect; if Discord isn't running, the connect silently no-ops. We
+        retry once a minute so opening Discord later still picks up presence."""
+        ok = self._discord.connect()
+        if not ok:
+            QTimer.singleShot(60_000, self._maybe_start_discord_presence)
 
     def _start_online_presence(self) -> None:
         uid = current_user_id()
@@ -882,21 +1108,31 @@ class MainWindow(QMainWindow):
         self._discord.set_source(kind, label)
 
     def _save_custom_layout(self) -> None:
-        """Save current panel geometry/visibility/minimized into a NEW Custom slot
-        (Custom 1 → Custom 9). Each save creates a new entry that shows up in the
-        cycler — older custom layouts are kept."""
+        """Capture every floating panel's current geometry/visibility/minimized
+        state into a Custom slot. Rules:
+          - If the user is currently ON a Custom slot, OVERRIDE that slot.
+          - Otherwise create the next available Custom slot (1, 2, or 3).
+          - Cap at MAX_CUSTOM_LAYOUTS slots. When full and not currently on a
+            Custom slot, ask the user to switch to one first."""
         if not self._overlay_active:
             return
         s = QSettings(ORG_NAME, APP_NAME)
-        # Also persist the standard auto-save so a restart-without-cycle still works.
+        # Keep the position auto-save in sync — that's the "where each panel
+        # was last sitting" memory, NOT a layout slot.
         self._save_overlay_layout(s)
-        count = self._read_int(s, "layouts/custom_count", 0)
-        if count >= MAX_CUSTOM_LAYOUTS:
-            # Roll over the oldest slot (slot 1) by shifting everything down.
-            for i in range(1, count):
-                self._copy_layout_slot(s, str(i + 1), str(i))
-            slot = str(count)
+
+        # Decide which slot to write into.
+        if isinstance(self._current_layout, str) and self._current_layout.startswith(CUSTOM_LAYOUT_PREFIX):
+            slot = self._current_layout[len(CUSTOM_LAYOUT_PREFIX):]
         else:
+            count = self._read_int(s, "layouts/custom_count", 0)
+            if count >= MAX_CUSTOM_LAYOUTS:
+                QMessageBox.information(
+                    self, "Custom layout limit",
+                    f"You already have {MAX_CUSTOM_LAYOUTS} custom layouts (the maximum). "
+                    "Cycle to one of them with the ⟳ Layout button, then hit Save Custom "
+                    "Layout again to overwrite that slot with your current arrangement.")
+                return
             count += 1
             slot = str(count)
             s.setValue("layouts/custom_count", count)
@@ -958,6 +1194,8 @@ class MainWindow(QMainWindow):
         s.setValue("ui/source_collapsed",   bool(self.source_dock.is_collapsed()))
         s.setValue("ui/watch_collapsed",    bool(self.watch_dock.is_collapsed()))
         s.setValue("ui/playback_collapsed", bool(self.playback_dock.is_collapsed()))
+        # Persist the active layout so cycling survives a relaunch.
+        s.setValue("layouts/current", str(self._current_layout))
         # Persist overlay panel positions even when closing while still in overlay.
         if self._overlay_active:
             self._save_overlay_layout(s)
@@ -1021,9 +1259,11 @@ def main() -> int:
     apply_theme(DEFAULT_COLORS)
 
     # Show a quick splash NOW (before any slow work) so the user sees activity
-    # the instant they double-click the exe. Closes as soon as the main window
-    # is ready — no artificial wait.
+    # the instant they double-click the exe. The splash also displays the
+    # current version + changelog bullets, so we hold it visible for at least
+    # a couple of seconds after loading completes (see splash_min_ms below).
     from .widgets.splash import Splash
+    splash_start = time.monotonic()
     splash = Splash()
     splash.show_and_pump()
 
@@ -1036,6 +1276,9 @@ def main() -> int:
         dlg = AuthDialog()
         if dlg.exec() != AuthDialog.Accepted:
             return 0
+        # Reset the splash-visible timer so the changelog is readable on the
+        # post-login splash too.
+        splash_start = time.monotonic()
         splash = Splash(); splash.show_and_pump()
 
     # Pull user's saved color scheme
@@ -1064,6 +1307,17 @@ def main() -> int:
             )
         except Exception:
             pass
+
+    # Keep the splash visible long enough to read the changelog bullets even
+    # on a hot cache where loading completes in <1 s.
+    splash_min_ms = 2500
+    elapsed_ms = int((time.monotonic() - splash_start) * 1000)
+    remaining_ms = max(0, splash_min_ms - elapsed_ms)
+    if remaining_ms > 0:
+        loop = QEventLoop()
+        QTimer.singleShot(remaining_ms, loop.quit)
+        loop.exec()
+
     w.show()
     splash.close()
     QTimer.singleShot(0, lambda: w.set_overlay_mode(True))

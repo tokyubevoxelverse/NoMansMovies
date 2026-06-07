@@ -48,6 +48,14 @@ if not ASSETS_DIR.exists() and (APP_ROOT / "assets").exists():
 # ====== App ======
 APP_NAME = "NoMansMovies"
 ORG_NAME = "NoMansMovies"
+VERSION = "0.2.5"
+
+# 2–3 short bullets shown on the splash under the version.
+CHANGELOG_BULLETS = [
+    "Layout system rework: 3 custom slots, Save now overrides the active slot",
+    "New title-bar buttons on the Movie panel: Minimize all + bring back NoMansMovies controls",
+    "New preset layout: Movie + Playback",
+]
 
 # Default color scheme — applied app-wide via theme.apply_theme().
 # Keys:
@@ -84,20 +92,33 @@ DEFAULT_VIDEO_CORNER_RADIUS = 12
 DEFAULT_VIDEO_CORNER_RADIUS_RANGE = (0, 40)
 
 # ---- Layout presets (used by overlay Cycle Layouts + Movie-only cinema mode) ----
-LAYOUT_DEFAULT       = "default"
-LAYOUT_MOVIE_SOURCES = "movie_sources"
-LAYOUT_MOVIE_ONLY    = "movie_only"
-LAYOUTS = [LAYOUT_DEFAULT, LAYOUT_MOVIE_SOURCES, LAYOUT_MOVIE_ONLY]   # built-ins
+LAYOUT_DEFAULT            = "default"
+LAYOUT_MOVIE_SOURCES      = "movie_sources"
+LAYOUT_MOVIE_ONLY         = "movie_only"
+LAYOUT_MOVIE_PLAYBACK     = "movie_playback"
+LAYOUT_MOVIE_PLAYER_ONLY  = "movie_player_only"   # video panel ONLY — everything
+                                                  # else (including NoMansMovies
+                                                  # controls) is hidden
+# Built-ins that appear BEFORE the user's custom slots in the cycler.
+LAYOUTS = [LAYOUT_DEFAULT, LAYOUT_MOVIE_SOURCES, LAYOUT_MOVIE_ONLY, LAYOUT_MOVIE_PLAYBACK]
+# Built-ins that appear AFTER all custom slots in the cycler (so once you
+# cycle into Movie-player-only — which hides the controls bar — the wrap-
+# around takes you back to Default rather than skipping past your customs).
+LAYOUTS_AFTER_CUSTOMS = [LAYOUT_MOVIE_PLAYER_ONLY]
+# Every built-in (used for validation).
+ALL_BUILTIN_LAYOUTS = LAYOUTS + LAYOUTS_AFTER_CUSTOMS
 LAYOUT_LABELS = {
-    LAYOUT_DEFAULT:       "Default",
-    LAYOUT_MOVIE_SOURCES: "Movie + Sources",
-    LAYOUT_MOVIE_ONLY:    "Movie only",
+    LAYOUT_DEFAULT:           "Default",
+    LAYOUT_MOVIE_SOURCES:     "Movie + Sources",
+    LAYOUT_MOVIE_ONLY:        "Movie only",
+    LAYOUT_MOVIE_PLAYBACK:    "Movie + Playback",
+    LAYOUT_MOVIE_PLAYER_ONLY: "Movie player only",
 }
 # Custom user-saved layouts are stored separately and referenced as
-# "custom:1", "custom:2", … — they don't appear in LAYOUTS but DO appear in
-# the cycler (see main.py: _all_layouts / _cycle_layout).
+# "custom:1", "custom:2", "custom:3" — they don't appear in LAYOUTS but DO
+# appear in the cycler (see main.py: _all_layouts / _cycle_layout).
 CUSTOM_LAYOUT_PREFIX = "custom:"
-MAX_CUSTOM_LAYOUTS = 9
+MAX_CUSTOM_LAYOUTS = 3
 
 PRESET_THEMES = {
     "Theater":  {"bg": "#0f0f14", "fg": "#f0f0f5", "accent": "#e50914", "border": "#2a2a35", "panel": "#16161d", "muted": "#8a8a95"},
